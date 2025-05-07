@@ -64,6 +64,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
 
+      - name: Log in to GHCR (docker on amd64, podman on arm64)
+        run: |
+          if [ "${{ inputs.platform }}" = "arm64" ]; then
+            echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+          else
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          fi
+
       - name: Setup Just
         uses: extractions/setup-just@e33e0265a09d6d736e2ee1e0eb685ef1de4669ff # v3
 
@@ -92,5 +100,4 @@ jobs:
           if-no-files-found: error
           retention-days: 0
           compression-level: 0
-          overwrite: true 
-      
+          overwrite: true
