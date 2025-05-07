@@ -22,13 +22,15 @@ on:
       - './iso.toml'
       - './.github/workflows/build-iso.yml'
       - './Justfile'
-      - './Containerfile' # Important: Trigger workflow if Containerfile changes
+      # Containerfile changes in this repo no longer directly trigger ISO rebuilds
+      # unless this workflow is also responsible for testing local Containerfile changes
+      # by building a temporary image. Given the new constraint, we assume it's not.
 
 env:
-  # Consistent image naming, matching build.yml's likely output
-  IMAGE_REGISTRY_OWNER: "ghcr.io/${{ github.repository_owner }}"
-  IMAGE_NAME: "${{ github.event.repository.name }}" # This will be 'incuscore'
-  DEFAULT_TAG: "latest"
+  # Define the exact image to pull
+  # This image is expected to be built and pushed by a separate workflow (e.g., build.yml in Arian-D/incuscore)
+  PREBUILT_IMAGE_PATH: "ghcr.io/arian-d/incuscore"
+  PREBUILT_IMAGE_TAG: "latest" # Or a specific tag like "20250507" for reproducibility
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
@@ -42,18 +44,16 @@ jobs:
       fail-fast: false
     permissions:
       contents: read
-      packages: write # Necessary if this workflow pushes the container image
-      id-token: write
+      packages: read # <<< CHANGED to read: only needs to pull the public image
+      id-token: write # Retained if any future steps might need OIDC
 
     steps:
-      - name: Prepare image path variables
+      - name: Prepare full image path variable
         id: prep_vars
         run: |
-          REG_OWNER_LOWER=$(echo "${{ env.IMAGE_REGISTRY_OWNER }}" | tr '[:upper:]' '[:lower:]')
-          IMG_NAME_LOWER=$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
-          echo "FULL_IMAGE_PATH=${REG_OWNER_LOWER}/${IMG_NAME_LOWER}:${DEFAULT_TAG}" >> $GITHUB_ENV
-          echo "IMAGE_REGISTRY_PATH=${REG_OWNER_LOWER}/${IMG_NAME_LOWER}" >> $GITHUB_ENV
-
+          FULL_IMAGE_TO_PULL="${{ env.PREBUILT_IMAGE_PATH }}:${{ env.PREBUILT_IMAGE_TAG }}"
+          echo "FULL_IMAGE_TO_PULL=${FULL_IMAGE_TO_PULL}" >> $GITHUB_ENV
+          echo "Image to be used for ISO: ${FULL_IMAGE_TO_PULL}"
 
       - name: Install dependencies (for arm64 runner)
         if: inputs.platform == 'arm64'
@@ -68,36 +68,25 @@ jobs:
         with:
           remove-codeql: true
 
-      - name: Checkout repository
+      - name: Checkout repository (contains iso.toml, Justfile etc.)
         uses: actions/checkout@v4
 
-      - name: Log in to GitHub Container Registry
-        # Use GITHUB_TOKEN for GHCR authentication.
-        # The GITHUB_TOKEN has necessary permissions when 'packages: write' is set.
+      - name: Log in to GitHub Container Registry (to pull image)
+        # While ghcr.io/arian-d/incuscore is public, login can prevent rate limits
+        # and is good practice if any private base images were ever involved.
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
-      - name: Pull or Build Container image
+      - name: Pull Pre-built Container Image
         run: |
-          echo "Attempting to pull image: ${{ env.FULL_IMAGE_PATH }}"
-          if ! docker pull ${{ env.FULL_IMAGE_PATH }}; then
-            echo "Image not found or pull failed. Building the image locally from Containerfile..."
-            # CRITICAL FIX: Use -f Containerfile to specify the correct build file
-            docker build -f Containerfile -t ${{ env.FULL_IMAGE_PATH }} .
-            
-            echo "Pushing the locally built image to ${{ env.FULL_IMAGE_PATH }}..."
-            # This push makes this workflow also a publisher of the container image.
-            # Ensure this is intended, or rely solely on your 'build.yml' workflow to publish.
-            docker push ${{ env.FULL_IMAGE_PATH }}
-          else
-            echo "Successfully pulled image ${{ env.FULL_IMAGE_PATH }}"
-          fi
+          echo "Attempting to pull ${{ env.FULL_IMAGE_TO_PULL }}"
+          # Workflow will fail here if the image doesn't exist or pull fails.
+          docker pull ${{ env.FULL_IMAGE_TO_PULL }}
+          echo "Successfully pulled image ${{ env.FULL_IMAGE_TO_PULL }}"
 
       - name: Setup Just
         uses: extractions/setup-just@v3
 
       - name: Ensure yum symlink (for tools on runner if needed)
-        # This step is for tools run directly on the Ubuntu runner that might expect 'yum'.
-        # It does not affect the container build process which uses dnf5 from Fedora CoreOS.
         run: |
           if command -v dnf &> /dev/null && ! command -v yum &> /dev/null; then
             sudo ln -sf /usr/bin/dnf /usr/bin/yum
@@ -110,22 +99,19 @@ jobs:
         id: build_iso
         uses: ublue-os/bootc-image-builder-action@main
         with:
-          # Consider aligning with Justfile: quay.io/centos-bootc/bootc-image-builder:latest
-          bootc-image-builder-image: ghcr.io/centos-workstation/bootc-image-builder:latest 
+          bootc-image-builder-image: ghcr.io/centos-workstation/bootc-image-builder:latest
           use-librepo: true
           config-file: ./iso.toml
-          # The 'image' parameter is the source OCI/Docker image to convert into a bootable ISO
-          image: ${{ env.FULL_IMAGE_PATH }}
+          # The 'image' parameter is the source OCI/Docker image to convert
+          image: ${{ env.FULL_IMAGE_TO_PULL }}
 
       - name: Upload ISO and Checksum to Job Artifacts
-        # This step runs only on workflow_dispatch if 'upload-to-s3' is not true,
-        # and not on pull_request events.
         if: inputs.upload-to-s3 != true && github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: bootable-iso-${{ inputs.platform || 'amd64' }}
-          path: ${{ steps.build_iso.outputs.output-directory }} # Corrected step ID
+          path: ${{ steps.build_iso.outputs.output-directory }}
           if-no-files-found: error
-          retention-days: 7 # Changed to 7 days, 0 means it's kept indefinitely until manually deleted or repo limit
+          retention-days: 7
           compression-level: 0
           overwrite: true
