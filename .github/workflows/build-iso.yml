@@ -46,7 +46,7 @@ jobs:
       - name: lower case the image registry in case of any capitalization
         run: |
           echo "IMAGE_REGISTRY=${IMAGE_REGISTRY,,}" >> ${GITHUB_ENV}
-      
+
       - name: Install dependencies
         if: inputs.platform == 'arm64'
         run: |
@@ -57,30 +57,24 @@ jobs:
 
       - name: Maximize build space
         if: inputs.platform != 'arm64'
-        uses: ublue-os/remove-unwanted-software@cc0becac701cf642c8f0a6613bbdaf5dc36b259e # v9
+        uses: ublue-os/remove-unwanted-software@cc0becac701cf642c8f0a6613bbdaf5dc36b259e
         with:
           remove-codeql: true
 
       - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        uses: actions/checkout@v4
 
-      - name: Log in to GHCR (docker on amd64, podman on arm64)
-        run: |
-          if [ "${{ inputs.platform }}" = "arm64" ]; then
-            echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u "${{ github.actor }}" --password-stdin
-          else
-            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          fi
+      - name: Log in to GitHub Container Registry
+        run: echo "${{ secrets.CR_PAT }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
-      - name: Setup Just
-        uses: extractions/setup-just@e33e0265a09d6d736e2ee1e0eb685ef1de4669ff # v3
+      - name: Pull the Docker image
+        run: docker pull ghcr.io/ib-bsb-br/incuscore:latest
 
       - name: Setup Just
         uses: extractions/setup-just@v3
 
       - name: Ensure yum supports 'check'
         run: |
-          # In CentOS 8+ environments, make yum an alias to dnf so 'check' works.
           sudo ln -sf /usr/bin/dnf /usr/bin/yum
 
       - name: Build ISO
@@ -94,7 +88,7 @@ jobs:
 
       - name: Upload ISOs and Checksum to Job Artifacts
         if: inputs.upload-to-s3 != true && github.event_name != 'pull_request'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@v4
         with:
           path: ${{ steps.build.outputs.output-directory }}
           if-no-files-found: error
