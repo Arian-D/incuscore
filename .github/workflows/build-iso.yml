@@ -67,8 +67,13 @@ jobs:
       - name: Log in to GitHub Container Registry
         run: echo "${{ secrets.CR_PAT }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
-      - name: Pull the Docker image
-        run: docker pull ghcr.io/ib-bsb-br/incuscore:latest
+      - name: Pull or Build Docker image
+        run: |
+          if ! docker pull ghcr.io/ib-bsb-br/incuscore:latest; then
+            echo "Image not found. Building the image locally..."
+            docker build -t ghcr.io/ib-bsb-br/incuscore:latest .
+            docker push ghcr.io/ib-bsb-br/incuscore:latest
+          fi
 
       - name: Setup Just
         uses: extractions/setup-just@v3
