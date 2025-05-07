@@ -22,9 +22,12 @@ on:
       - './iso.toml'
       - './.github/workflows/build-iso.yml'
       - './Justfile'
+      - './Containerfile' # Important: Trigger workflow if Containerfile changes
 
 env:
-  IMAGE_REGISTRY: "ghcr.io/${{ github.repository }}"
+  # Consistent image naming, matching build.yml's likely output
+  IMAGE_REGISTRY_OWNER: "ghcr.io/${{ github.repository_owner }}"
+  IMAGE_NAME: "${{ github.event.repository.name }}" # This will be 'incuscore'
   DEFAULT_TAG: "latest"
 
 concurrency:
@@ -39,64 +42,90 @@ jobs:
       fail-fast: false
     permissions:
       contents: read
-      packages: read
+      packages: write # Necessary if this workflow pushes the container image
       id-token: write
 
     steps:
-      - name: lower case the image registry in case of any capitalization
+      - name: Prepare image path variables
+        id: prep_vars
         run: |
-          echo "IMAGE_REGISTRY=${IMAGE_REGISTRY,,}" >> ${GITHUB_ENV}
+          REG_OWNER_LOWER=$(echo "${{ env.IMAGE_REGISTRY_OWNER }}" | tr '[:upper:]' '[:lower:]')
+          IMG_NAME_LOWER=$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
+          echo "FULL_IMAGE_PATH=${REG_OWNER_LOWER}/${IMG_NAME_LOWER}:${DEFAULT_TAG}" >> $GITHUB_ENV
+          echo "IMAGE_REGISTRY_PATH=${REG_OWNER_LOWER}/${IMG_NAME_LOWER}" >> $GITHUB_ENV
 
-      - name: Install dependencies
+
+      - name: Install dependencies (for arm64 runner)
         if: inputs.platform == 'arm64'
         run: |
           set -x
           sudo apt update -y
-          sudo apt install -y \
-            podman
+          sudo apt install -y podman
 
-      - name: Maximize build space
+      - name: Maximize build space (for amd64 runner)
         if: inputs.platform != 'arm64'
         uses: ublue-os/remove-unwanted-software@cc0becac701cf642c8f0a6613bbdaf5dc36b259e
         with:
           remove-codeql: true
 
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Log in to GitHub Container Registry
-        run: echo "${{ secrets.CR_PAT }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+        # Use GITHUB_TOKEN for GHCR authentication.
+        # The GITHUB_TOKEN has necessary permissions when 'packages: write' is set.
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
-      - name: Pull or Build Docker image
+      - name: Pull or Build Container image
         run: |
-          if ! docker pull ghcr.io/ib-bsb-br/incuscore:latest; then
-            echo "Image not found. Building the image locally..."
-            docker build -t ghcr.io/ib-bsb-br/incuscore:latest .
-            docker push ghcr.io/ib-bsb-br/incuscore:latest
+          echo "Attempting to pull image: ${{ env.FULL_IMAGE_PATH }}"
+          if ! docker pull ${{ env.FULL_IMAGE_PATH }}; then
+            echo "Image not found or pull failed. Building the image locally from Containerfile..."
+            # CRITICAL FIX: Use -f Containerfile to specify the correct build file
+            docker build -f Containerfile -t ${{ env.FULL_IMAGE_PATH }} .
+            
+            echo "Pushing the locally built image to ${{ env.FULL_IMAGE_PATH }}..."
+            # This push makes this workflow also a publisher of the container image.
+            # Ensure this is intended, or rely solely on your 'build.yml' workflow to publish.
+            docker push ${{ env.FULL_IMAGE_PATH }}
+          else
+            echo "Successfully pulled image ${{ env.FULL_IMAGE_PATH }}"
           fi
 
       - name: Setup Just
         uses: extractions/setup-just@v3
 
-      - name: Ensure yum supports 'check'
+      - name: Ensure yum symlink (for tools on runner if needed)
+        # This step is for tools run directly on the Ubuntu runner that might expect 'yum'.
+        # It does not affect the container build process which uses dnf5 from Fedora CoreOS.
         run: |
-          sudo ln -sf /usr/bin/dnf /usr/bin/yum
+          if command -v dnf &> /dev/null && ! command -v yum &> /dev/null; then
+            sudo ln -sf /usr/bin/dnf /usr/bin/yum
+            echo "Symlinked /usr/bin/dnf to /usr/bin/yum"
+          else
+            echo "yum command already exists or dnf not found. Skipping symlink."
+          fi
 
-      - name: Build ISO
-        id: build
+      - name: Build ISO using bootc-image-builder
+        id: build_iso
         uses: ublue-os/bootc-image-builder-action@main
         with:
-          bootc-image-builder-image: ghcr.io/centos-workstation/bootc-image-builder:latest
+          # Consider aligning with Justfile: quay.io/centos-bootc/bootc-image-builder:latest
+          bootc-image-builder-image: ghcr.io/centos-workstation/bootc-image-builder:latest 
           use-librepo: true
           config-file: ./iso.toml
-          image: ${{ env.IMAGE_REGISTRY }}:${{ env.DEFAULT_TAG }}
+          # The 'image' parameter is the source OCI/Docker image to convert into a bootable ISO
+          image: ${{ env.FULL_IMAGE_PATH }}
 
-      - name: Upload ISOs and Checksum to Job Artifacts
+      - name: Upload ISO and Checksum to Job Artifacts
+        # This step runs only on workflow_dispatch if 'upload-to-s3' is not true,
+        # and not on pull_request events.
         if: inputs.upload-to-s3 != true && github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
-          path: ${{ steps.build.outputs.output-directory }}
+          name: bootable-iso-${{ inputs.platform || 'amd64' }}
+          path: ${{ steps.build_iso.outputs.output-directory }} # Corrected step ID
           if-no-files-found: error
-          retention-days: 0
+          retention-days: 7 # Changed to 7 days, 0 means it's kept indefinitely until manually deleted or repo limit
           compression-level: 0
           overwrite: true
