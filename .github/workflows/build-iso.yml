@@ -22,10 +22,15 @@ on:
       - './iso.toml'
       - './.github/workflows/build-iso.yml'
       - './Justfile'
+      # Containerfile changes in this repo no longer directly trigger ISO rebuilds
+      # unless this workflow is also responsible for testing local Containerfile changes
+      # by building a temporary image. Given the new constraint, we assume it's not.
 
 env:
-  IMAGE_REGISTRY: "ghcr.io/${{ github.repository }}"
-  DEFAULT_TAG: "latest"
+  # Define the exact image to pull
+  # This image is expected to be built and pushed by a separate workflow (e.g., build.yml in Arian-D/incuscore)
+  PREBUILT_IMAGE_PATH: "ghcr.io/ib-bsb-br/incuscore"
+  PREBUILT_IMAGE_TAG: "latest" # Or a specific tag like "20250507" for reproducibility  
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
@@ -39,65 +44,74 @@ jobs:
       fail-fast: false
     permissions:
       contents: read
-      packages: read
-      id-token: write
+      packages: read # <<< CHANGED to read: only needs to pull the public image
+      id-token: write # Retained if any future steps might need OIDC
 
     steps:
-      - name: lower case the image registry in case of any capitalization
+      - name: Prepare full image path variable
+        id: prep_vars
         run: |
-          echo "IMAGE_REGISTRY=${IMAGE_REGISTRY,,}" >> ${GITHUB_ENV}
-      
-      - name: Install dependencies
+          FULL_IMAGE_TO_PULL="${{ env.PREBUILT_IMAGE_PATH }}:${{ env.PREBUILT_IMAGE_TAG }}"
+          echo "FULL_IMAGE_TO_PULL=${FULL_IMAGE_TO_PULL}" >> $GITHUB_ENV
+          echo "Image to be used for ISO: ${FULL_IMAGE_TO_PULL}"
+
+      - name: Install dependencies (for arm64 runner)
         if: inputs.platform == 'arm64'
         run: |
           set -x
           sudo apt update -y
-          sudo apt install -y \
-            podman
+          sudo apt install -y podman
 
-      - name: Maximize build space
+      - name: Maximize build space (for amd64 runner)
         if: inputs.platform != 'arm64'
-        uses: ublue-os/remove-unwanted-software@cc0becac701cf642c8f0a6613bbdaf5dc36b259e # v9
+        uses: ublue-os/remove-unwanted-software@cc0becac701cf642c8f0a6613bbdaf5dc36b259e
         with:
           remove-codeql: true
 
-      - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - name: Checkout repository (contains iso.toml, Justfile etc.)
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry (to pull image)
+        # While ghcr.io/arian-d/incuscore is public, login can prevent rate limits
+        # and is good practice if any private base images were ever involved.
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Pull Pre-built Container Image
+        run: |
+          echo "Attempting to pull ${{ env.FULL_IMAGE_TO_PULL }}"
+          # Workflow will fail here if the image doesn't exist or pull fails.
+          docker pull ${{ env.FULL_IMAGE_TO_PULL }}
+          echo "Successfully pulled image ${{ env.FULL_IMAGE_TO_PULL }}"
 
       - name: Setup Just
-        uses: extractions/setup-just@e33e0265a09d6d736e2ee1e0eb685ef1de4669ff # v3
+        uses: extractions/setup-just@v3
 
-      - name: Build ISO
-        id: build
+      - name: Ensure yum symlink (for tools on runner if needed)
+        run: |
+          if command -v dnf &> /dev/null && ! command -v yum &> /dev/null; then
+            sudo ln -sf /usr/bin/dnf /usr/bin/yum
+            echo "Symlinked /usr/bin/dnf to /usr/bin/yum"
+          else
+            echo "yum command already exists or dnf not found. Skipping symlink."
+          fi
+
+      - name: Build ISO using bootc-image-builder
+        id: build_iso
         uses: ublue-os/bootc-image-builder-action@main
         with:
           bootc-image-builder-image: ghcr.io/centos-workstation/bootc-image-builder:latest
           use-librepo: true
           config-file: ./iso.toml
-          image: ${{ env.IMAGE_REGISTRY }}:${{ env.DEFAULT_TAG }}
+          # The 'image' parameter is the source OCI/Docker image to convert
+          image: ${{ env.FULL_IMAGE_TO_PULL }}
 
-      - name: Upload ISOs and Checksum to Job Artifacts
+      - name: Upload ISO and Checksum to Job Artifacts
         if: inputs.upload-to-s3 != true && github.event_name != 'pull_request'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@v4
         with:
-          path: ${{ steps.build.outputs.output-directory }}
+          name: bootable-iso-${{ inputs.platform || 'amd64' }}
+          path: ${{ steps.build_iso.outputs.output-directory }}
           if-no-files-found: error
-          retention-days: 0
+          retention-days: 7
           compression-level: 0
           overwrite: true
-      
-      - name: Upload to S3
-        if: inputs.upload-to-s3 == true && github.event_name != 'pull_request'
-        shell: bash
-        env:
-          RCLONE_CONFIG_S3_TYPE: s3
-          RCLONE_CONFIG_S3_PROVIDER: ${{ secrets.S3_PROVIDER }}
-          RCLONE_CONFIG_S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
-          RCLONE_CONFIG_S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
-          RCLONE_CONFIG_S3_REGION: ${{ secrets.S3_REGION }}
-          RCLONE_CONFIG_S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
-          SOURCE_DIR: ${{ steps.build.outputs.output-directory }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y rclone
-          rclone copy $SOURCE_DIR S3:${{ secrets.S3_BUCKET_NAME }}

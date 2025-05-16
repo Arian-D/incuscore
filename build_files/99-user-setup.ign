@@ -1,0 +1,42 @@
+{
+  "ignition": {
+    "version": "3.4.0"
+  },
+  "passwd": {
+    "users": [
+      {
+        "groups": [
+          "wheel"
+        ],
+        "name": "root",
+        "passwordHash": "$6$ImarjE8isRQ3fdG4$XBBMTFIq3TjyhSBIJodNWuRiqPjn1nKs9L7LW4qC0M0cbu5EOn63Pl4xQCMr04Y/6Ib88rYtDERgaJueri4Ej0",
+        "sshAuthorizedKeys": [
+          "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBw0ESzeBbzVmMBfj+bqtsnccZd1u7oxFiIHk3f/YKva root@linaro-alip"
+        ]
+      },
+      {
+        "groups": [
+          "wheel"
+        ],
+        "name": "core",
+        "passwordHash": "$6$a1F99ldZOvodWKiN$mrZ13gTH.q7LAio3B.9oEUKBYbxIt82uOKKh5qsgMo04414KLOAPZinxXKlwrrYWScZJk8Ut367CVtdvtaJpg.",
+        "sshAuthorizedKeys": [
+          "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKuoxCeNmDET5XjZaQPr5ANdhSmOWbI1iSVABWhRPeFl linaro@linaro-alip"
+        ]
+      }
+    ]
+  },
+  "systemd": {
+    "units": [
+      {
+        "dropins": [
+          {
+            "contents": "[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin root --noclear %I $TERM\n",
+            "name": "10-autologin.conf"
+          }
+        ],
+        "name": "getty@tty1.service"
+      }
+    ]
+  }
+}
