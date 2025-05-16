@@ -29,8 +29,8 @@ on:
 env:
   # Define the exact image to pull
   # This image is expected to be built and pushed by a separate workflow (e.g., build.yml in Arian-D/incuscore)
-  PREBUILT_IMAGE_PATH: "ghcr.io/arian-d/incuscore"
-  PREBUILT_IMAGE_TAG: "latest" # Or a specific tag like "20250507" for reproducibility
+  PREBUILT_IMAGE_PATH: "ghcr.io/ib-bsb-br/incuscore"
+  PREBUILT_IMAGE_TAG: "latest" # Or a specific tag like "20250507" for reproducibility  
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
