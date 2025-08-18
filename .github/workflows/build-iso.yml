@@ -69,7 +69,7 @@ jobs:
           remove-codeql: true
 
       - name: Checkout repository (contains iso.toml, Justfile etc.)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Log in to GitHub Container Registry (to pull image)
         # While ghcr.io/arian-d/incuscore is public, login can prevent rate limits
